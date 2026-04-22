@@ -32,7 +32,9 @@ extern "C" {
 #if defined(_WIN32)
 #define LITERT_LM_C_API_EXPORT __declspec(dllexport)
 #else
-#define LITERT_LM_C_API_EXPORT
+// Ensure symbols are exported when building the shared library with
+// -fvisibility=hidden.
+#define LITERT_LM_C_API_EXPORT __attribute__((visibility("default")))
 #endif
 
 // Opaque pointer for the LiteRT LM Engine.
@@ -560,6 +562,20 @@ double litert_lm_benchmark_info_get_decode_tokens_per_sec_at(
 typedef void (*LiteRtLmStreamCallback)(void* callback_data, const char* chunk,
                                        bool is_final, const char* error_msg);
 
+// Starts the decoding process for the model to predict the response based
+// on the input prompt/query added after using litert_lm_session_run_prefill.
+// This is a non-blocking call that will stream responses via a callback.
+//
+// @param session The session to use.
+// @param callback The callback function to receive response chunks.
+// @param callback_data A pointer to user data that will be passed to the
+// callback.
+// @return 0 on success, non-zero on failure.
+LITERT_LM_C_API_EXPORT
+int litert_lm_session_run_decode_async(LiteRtLmSession* session,
+                                       LiteRtLmStreamCallback callback,
+                                       void* callback_data);
+
 // Generates content from the input prompt and streams the response via a
 // callback. This is a non-blocking call that will invoke the callback from a
 // background thread for each chunk.
@@ -643,6 +659,22 @@ int litert_lm_conversation_send_message_stream(
     LiteRtLmConversation* conversation, const char* message_json,
     const char* extra_context, LiteRtLmStreamCallback callback,
     void* callback_data);
+
+// Renders the message into a string according to the template.
+//
+// This function does not need to be called for actual message sending, as the
+// `litert_lm_conversation_send_message` and
+// `litert_lm_conversation_send_message_stream` functions will handle rendering
+// internally.
+//
+// @param conversation The conversation instance.
+// @param message_json A JSON string representing the message to render.
+// @return A pointer to the rendered string, or NULL on failure. The returned
+//   string is owned by the `conversation` object and is valid until the next
+//   call to this function or until the conversation is deleted.
+LITERT_LM_C_API_EXPORT
+const char* litert_lm_conversation_render_message_to_string(
+    LiteRtLmConversation* conversation, const char* message_json);
 
 // Cancels the ongoing inference process, for asynchronous inference.
 //

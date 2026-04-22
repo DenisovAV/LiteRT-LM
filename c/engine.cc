@@ -165,6 +165,7 @@ struct LiteRtLmBenchmarkInfo {
 
 struct LiteRtLmConversation {
   std::unique_ptr<Conversation> conversation;
+  std::string last_rendered_message;
 };
 
 struct LiteRtLmJsonResponse {
@@ -549,6 +550,21 @@ LiteRtLmResponses* litert_lm_session_run_decode(LiteRtLmSession* session) {
   return new LiteRtLmResponses{std::move(*responses)};
 }
 
+int litert_lm_session_run_decode_async(LiteRtLmSession* session,
+                                       LiteRtLmStreamCallback callback,
+                                       void* callback_data) {
+  if (!session || !session->session) {
+    return -1;
+  }
+  auto status =
+      session->session->RunDecodeAsync(CreateCallback(callback, callback_data));
+  if (!status.ok()) {
+    ABSL_LOG(ERROR) << "Failed to start decode stream: " << status.status();
+    return static_cast<int>(status.status().code());
+  }
+  return 0;
+}
+
 LiteRtLmResponses* litert_lm_session_generate_content(
     LiteRtLmSession* session, const LiteRtLmInputData* inputs,
     size_t num_inputs) {
@@ -900,6 +916,29 @@ int litert_lm_conversation_send_message_stream(
     return static_cast<int>(status.code());
   }
   return 0;
+}
+
+const char* litert_lm_conversation_render_message_to_string(
+    LiteRtLmConversation* conversation, const char* message_json) {
+  if (!conversation || !conversation->conversation || !message_json) {
+    return nullptr;
+  }
+  nlohmann::json json_message =
+      nlohmann::json::parse(message_json, /*cb=*/nullptr,
+                            /*allow_exceptions=*/false);
+  if (json_message.is_discarded()) {
+    ABSL_LOG(ERROR) << "Failed to parse message JSON.";
+    return nullptr;
+  }
+
+  auto rendered = conversation->conversation->RenderMessageIntoString(
+      json_message, litert::lm::OptionalArgs());
+  if (!rendered.ok()) {
+    ABSL_LOG(ERROR) << "Failed to render message: " << rendered.status();
+    return nullptr;
+  }
+  conversation->last_rendered_message = std::move(*rendered);
+  return conversation->last_rendered_message.c_str();
 }
 
 void litert_lm_conversation_cancel_process(LiteRtLmConversation* conversation) {
