@@ -29,7 +29,6 @@ cc_library(
     hdrs = ["audio_executor_settings.h"],
     deps = [
         ":executor_settings_base",
-        "@com_google_absl//absl/log:absl_log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
@@ -48,6 +47,7 @@ cc_test(
         ":executor_settings_base",
         "@com_google_googletest//:gtest_main",
         "@com_google_absl//absl/status",
+        "@litert//litert/cc/internal:scoped_file",
         "//runtime/util:test_utils",
     ],
 )
@@ -58,7 +58,6 @@ cc_library(
     hdrs = ["vision_executor_settings.h"],
     deps = [
         ":executor_settings_base",
-        "@com_google_absl//absl/log:absl_log",
         "@com_google_absl//absl/status",
         "@com_google_absl//absl/status:statusor",
         "@com_google_absl//absl/strings",
@@ -76,6 +75,7 @@ cc_test(
         ":vision_executor_settings",
         "@com_google_googletest//:gtest_main",
         "@com_google_absl//absl/status",
+        "@litert//litert/cc/internal:scoped_file",
         "//runtime/util:test_utils",
     ],
 )
@@ -159,6 +159,8 @@ cc_library(
             "@litert//litert/cc:litert_macros",
             "@litert//litert/cc:litert_model",
             "@litert//litert/cc:litert_tensor_buffer",
+            "@litert//litert/cc/options:litert_cpu_options",
+            "@litert//litert/cc/options:litert_gpu_options",
         ],
     }),
 )
@@ -181,11 +183,12 @@ cc_test(
         "@litert//litert/cc:litert_ranked_tensor_type",
         "@litert//litert/cc:litert_tensor_buffer",
         "@litert//litert/cc:litert_tensor_buffer_types",
+        "@litert//litert/cc/options:litert_cpu_options",
+        "@litert//litert/cc/options:litert_gpu_options",
         "@litert//litert/test:matchers",
         "//runtime/components:model_resources",
         "//runtime/util:memory_mapped_file",
         "//runtime/util:scoped_file",
-        "//runtime/util:tensor_buffer_util",
         "//runtime/util:test_utils",
         "@litert//tflite/types:half",
     ],

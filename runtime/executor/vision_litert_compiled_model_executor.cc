@@ -53,7 +53,6 @@
 #include "litert/cc/litert_tensor_buffer.h"  // from @litert
 #include "litert/cc/options/litert_cpu_options.h"  // from @litert
 #include "litert/cc/options/litert_gpu_options.h"  // from @litert
-#include "litert/cc/options/litert_runtime_options.h"  // from @litert
 #include "runtime/components/model_resources.h"
 #include "runtime/executor/executor_settings_base.h"
 #include "runtime/executor/litert_compiled_model_executor_utils.h"
@@ -76,36 +75,9 @@ constexpr absl::string_view kFeatures = "features";
 // The mask input tensor name for ViT encoder.
 constexpr absl::string_view kMask = "mask";
 
-absl::Status SetCpuCacheOptions(
-    const absl::StatusOr<std::string>& weight_cache_file,
-    std::shared_ptr<litert::lm::ScopedFile> scoped_cache_file,
-    litert::CpuOptions& cpu_options, absl::string_view logging_prefix) {
-  if (scoped_cache_file != nullptr) {
-    ASSIGN_OR_RETURN(auto duplicated, scoped_cache_file->Duplicate());
-    ASSIGN_OR_RETURN(int fd, duplicated.Release());
-    cpu_options.SetXNNPackWeightCacheFileDescriptor(fd);
-    ABSL_LOG(INFO) << logging_prefix
-                   << " use provided cache file descriptor: " << fd;
-  } else if (weight_cache_file.ok()) {
-    const std::string& weight_cache_path = *weight_cache_file;
-    cpu_options.SetXNNPackWeightCachePath(weight_cache_path.c_str());
-    ABSL_LOG(INFO) << logging_prefix
-                   << " use cache path: " << weight_cache_path;
-  } else {
-    ABSL_LOG(INFO) << logging_prefix << " does not use cache.";
-  }
-  return absl::OkStatus();
-}
-
-absl::Status SetGpuOptions(
-    const std::string& weight_cache_path,
-    std::shared_ptr<litert::lm::ScopedFile> scoped_cache_file,
-    const absl::StatusOr<
-        std::variant<std::string, std::shared_ptr<litert::lm::ScopedFile>>>&
-        program_cache_file,
-    const VisionExecutorSettings& executor_settings,
-    absl::string_view cache_key, absl::string_view logging_prefix,
-    litert::GpuOptions& gpu_options) {
+// Set the default GPU options for the model.
+absl::Status SetGpuOptions(const VisionExecutorSettings& executor_settings,
+                           litert::GpuOptions& gpu_options) {
 #if defined(LITERT_USE_WEBGPU_ACCELERATOR)
   gpu_options.SetBackend(GpuOptions::Backend::kWebGpu);
 #endif  // defined(LITERT_USE_WEBGPU_ACCELERATOR)
@@ -130,43 +102,6 @@ absl::Status SetGpuOptions(
 #endif  // !__APPLE__
   gpu_options.SetMadviseOriginalSharedTensors(true);
   gpu_options.SetConvertWeightsOnGpu(true);
-  gpu_options.SetModelCacheKey(cache_key.data());
-  std::string cache_path = weight_cache_path;
-  bool serialization_dir_set = false;
-  if (cache_path != ":nocache") {
-    if (cache_path.empty()) {
-      ASSIGN_OR_RETURN(auto model_path,
-                       executor_settings.GetModelAssets().GetPath());
-      cache_path =
-          std::filesystem::path(std::string(model_path)).parent_path().string();
-      if (cache_path.empty()) {
-        cache_path = std::filesystem::current_path().string();
-      }
-    }
-    gpu_options.SetSerializationDir(cache_path.c_str());
-    gpu_options.SetSerializeExternalTensors(true);
-    serialization_dir_set = true;
-  }
-  if (program_cache_file.ok()) {
-    if (std::holds_alternative<std::string>(*program_cache_file)) {
-      if (!serialization_dir_set) {
-        cache_path =
-            std::filesystem::path(std::get<std::string>(*program_cache_file))
-                .parent_path()
-                .string();
-        gpu_options.SetSerializationDir(cache_path.c_str());
-      }
-    } else {
-      auto scoped_cache_file =
-          std::get<std::shared_ptr<lm::ScopedFile>>(*program_cache_file);
-      ASSIGN_OR_RETURN(auto duplicated, scoped_cache_file->Duplicate());
-      ASSIGN_OR_RETURN(int fd, duplicated.Release());
-      gpu_options.SetProgramCacheFd(fd);
-    }
-    gpu_options.SetSerializeProgramCache(true);
-  } else {
-    gpu_options.SetSerializeProgramCache(false);
-  }
   return absl::OkStatus();
 }
 
@@ -187,7 +122,9 @@ absl::Status VisionLiteRtCompiledModelExecutor::VisionEncoder::Initialize() {
   // TODO(b/405424188): - Add support for NPU backends.
   LITERT_ASSIGN_OR_RETURN(auto options, Options::Create());
   auto weight_cache_file = vision_executor_settings_.GetWeightCacheFile(
-      ".vision_encoder.xnnpack_cache");
+      absl::StrCat(VisionExecutorSettings::kEncoderName,
+                   ExecutorSettingsBase::kXnnpackCacheSuffix),
+      /*check_and_clean=*/true);
   std::string weight_cache_path = vision_executor_settings_.GetCacheDir();
   auto activation_data_type = ActivationDataType::FLOAT16;
   if (vision_executor_settings_.GetActivationDataType().has_value()) {
@@ -200,11 +137,10 @@ absl::Status VisionLiteRtCompiledModelExecutor::VisionEncoder::Initialize() {
       LITERT_ASSIGN_OR_RETURN(auto& cpu_options, options.GetCpuOptions());
       // Set the number of threads to 4 by default.
       cpu_options.SetNumThreads(4);
-      std::shared_ptr<ScopedFile> scoped_encoder_cache_file =
-          vision_executor_settings_.GetScopedEncoderCacheFile();
-      RETURN_IF_ERROR(SetCpuCacheOptions(weight_cache_file,
-                                         scoped_encoder_cache_file, cpu_options,
-                                         "vision_encoder"));
+      RETURN_IF_ERROR(SetCpuCacheOptions(
+          weight_cache_file,
+          /*logging_prefix=*/VisionExecutorSettings::kEncoderName,
+          cpu_options));
       options.SetHardwareAccelerators(litert::HwAccelerators::kCpu);
       break;
     }
@@ -214,14 +150,22 @@ absl::Status VisionLiteRtCompiledModelExecutor::VisionEncoder::Initialize() {
       ASSIGN_OR_RETURN(auto model_path,
                        vision_executor_settings_.GetModelAssets().GetPath());
       absl::string_view model_basename = Basename(model_path);
+      LITERT_ASSIGN_OR_RETURN(std::string metadata_id,
+                                GetFileCacheIdentifier(model_path));
+      std::string cache_key =
+          absl::StrCat(model_basename, VisionExecutorSettings::kEncoderName,
+                       "_", metadata_id);
+      ABSL_LOG(INFO) << "Vision cache key: " << cache_key;
       auto program_cache_file = vision_executor_settings_.GetProgramCacheFile(
-          ".mldrift_program_cache.vision_encoder.bin");
-      RETURN_IF_ERROR(
-          SetGpuOptions(weight_cache_path,
-                        vision_executor_settings_.GetScopedEncoderCacheFile(),
-                        program_cache_file, vision_executor_settings_,
-                        absl::StrCat(model_basename, ".vision_encoder"),
-                        "vision_encoder", gpu_options));
+          absl::StrCat(VisionExecutorSettings::kEncoderName,
+                       ExecutorSettingsBase::kMlDriftCacheSuffix),
+          /*check_and_clean=*/true);
+      RETURN_IF_ERROR(SetGpuOptions(vision_executor_settings_, gpu_options));
+      RETURN_IF_ERROR(SetGpuCacheOptions(
+          weight_cache_path, program_cache_file, vision_executor_settings_,
+          cache_key,
+          /*logging_prefix=*/VisionExecutorSettings::kEncoderName,
+          gpu_options));
       options.SetHardwareAccelerators(litert::HwAccelerators::kGpu);
       break;
     }
@@ -272,7 +216,9 @@ absl::Status VisionLiteRtCompiledModelExecutor::VisionAdapter::Initialize() {
   // TODO(b/405424188): - Add support for NPU backends.
   LITERT_ASSIGN_OR_RETURN(auto options, Options::Create());
   auto weight_cache_file = vision_executor_settings_.GetWeightCacheFile(
-      ".vision_adapter.xnnpack_cache");
+      absl::StrCat(VisionExecutorSettings::kAdapterName,
+                   ExecutorSettingsBase::kXnnpackCacheSuffix),
+      /*check_and_clean=*/true);
   std::string weight_cache_path = vision_executor_settings_.GetCacheDir();
   switch (backend_) {
     case Backend::CPU: {
@@ -280,11 +226,9 @@ absl::Status VisionLiteRtCompiledModelExecutor::VisionAdapter::Initialize() {
       LITERT_ASSIGN_OR_RETURN(auto& cpu_options, options.GetCpuOptions());
       // Set the number of threads to 4 by default.
       cpu_options.SetNumThreads(4);
-      std::shared_ptr<ScopedFile> scoped_adapter_cache_file =
-          vision_executor_settings_.GetScopedAdapterCacheFile();
       RETURN_IF_ERROR(SetCpuCacheOptions(weight_cache_file,
-                                         scoped_adapter_cache_file, cpu_options,
-                                         "vision_adapter"));
+                                         VisionExecutorSettings::kAdapterName,
+                                         cpu_options));
       options.SetHardwareAccelerators(litert::HwAccelerators::kCpu);
       break;
     }
@@ -471,9 +415,9 @@ absl::StatusOr<ExecutorVisionData> VisionLiteRtCompiledModelExecutor::Encode(
                               input_buffers[input_index].PackedSize());
       size_t written_size = input_data.size() * sizeof(float);
       if (packed_size > written_size) {
-        std::memset(reinterpret_cast<uint8_t*>(lock_and_addr.second) +
-                        written_size,
-                    0, packed_size - written_size);
+        std::memset(
+            reinterpret_cast<uint8_t*>(lock_and_addr.second) + written_size, 0,
+            packed_size - written_size);
       }
     } else if (tensor_type.ElementType() == ElementType::Int32) {
       // Initialize the position buffer to -1 since the input image tensor
